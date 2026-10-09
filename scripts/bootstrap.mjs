@@ -44,7 +44,7 @@ export async function bootstrap(argv) {
   const passwordText = password.toString('utf8').replace(/\r?\n$/, '');
   if (passwordText.length < 14 || passwordText.length > 256) throw new Error('owner_password_requires_14_to_256_characters');
   const settings = {};
-  for (const key of ['TOMATO_SMTP_HOST', 'TOMATO_SMTP_PORT', 'TOMATO_SMTP_SECURE', 'TOMATO_SMTP_USER', 'TOMATO_EMAIL_FROM', 'TOMATO_GITHUB_CLIENT_ID', 'TOMATO_GOOGLE_CLIENT_ID', 'TOMATO_SIGNUP_ENABLED', 'TOMATO_LEGACY_CUTOVER_EXPIRES_AT']) {
+  for (const key of ['TOMATO_SMTP_HOST', 'TOMATO_SMTP_PORT', 'TOMATO_SMTP_SECURE', 'TOMATO_SMTP_USER', 'TOMATO_SMTP_DAILY_LIMIT', 'TOMATO_SMTP_HOURLY_LIMIT', 'TOMATO_EMAIL_FROM', 'TOMATO_GITHUB_CLIENT_ID', 'TOMATO_GOOGLE_CLIENT_ID', 'TOMATO_SIGNUP_ENABLED', 'TOMATO_LEGACY_CUTOVER_EXPIRES_AT', 'TOMATO_WORKLOADS_ENABLED']) {
     if (process.env[key]) settings[key] = process.env[key];
   }
   if (!settings.TOMATO_SMTP_HOST && args['owner-email-verified'] !== true) throw new Error('without_smtp_explicit_owner_email_verified_attestation_required');

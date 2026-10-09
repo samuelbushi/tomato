@@ -70,6 +70,10 @@ export interface InvitationView {
   id: string; username: string; role: AccountRole; createdAt: number; expiresAt: number;
   status: "pending" | "accepted" | "revoked" | "expired";
 }
+export interface InvitationPreview {
+  invitation: InvitationView; accountName: string; identityStatus: "new" | "unverified" | "verified";
+  legacyUsername: string | null; legacyExisting: boolean;
+}
 export interface SessionView { id: string; createdAt: number; expiresAt: number; current: boolean }
 export interface ApiKeyView { id: string; name: string; scope: ApiKeyScope; createdAt: number; expiresAt: number; lastUsedAt: number | null; parentKeyId?: string | null }
 export interface AuditView { id: string; actor: string; action: string; subject: string; occurredAt: number; apiKeyId?: string | null }
@@ -80,7 +84,8 @@ export interface AuthenticatedView {
 }
 export type UiPage =
   | { kind: "landing" }
-  | { kind: "login"; csrfToken: string; error?: string; notice?: string; pilotOnly: true; mode?: "signup" | "forgot" | "reset" | "verify"; resetToken?: string; next?: string; signup?: boolean; email?: boolean; github?: boolean; google?: boolean }
+  | { kind: "login"; csrfToken: string; error?: string; notice?: string; pilotOnly: true; mode?: "signup" | "forgot" | "reset" | "verify"; resetToken?: string; next?: string; signup?: boolean; email?: boolean; github?: boolean; google?: boolean; enrollment?: boolean }
+  | { kind: "enrollment"; csrfToken: string; stage: "proof" | "invite" | "contact" | "verify"; error?: string; notice?: string; email?: string | null; expiresAt?: number; emailToken?: string; invitationToken?: string; username?: string }
   | { kind: "accounts"; actor: Actor; accounts: AccountSummary[]; csrfToken: string; error?: string }
   | (AuthenticatedView & { kind: "dashboard"; monitors: DisplayMonitor[]; wallet: WalletView; incidents: Incident[]; deliveries: DeliveryView[]; readiness?: ReadinessView; notificationDefaults?: NotificationDefaultsView })
   | (AuthenticatedView & { kind: "monitor-edit"; monitor: DisplayMonitor | null; entered?: Record<string, string>; notificationDefaults?: NotificationDefaultsView })
@@ -98,6 +103,6 @@ export type UiPage =
   | (AuthenticatedView & { kind: "import-export"; importedCount?: number; importedHeartbeats?: { monitorId: string; name: string; token: string; url: string }[] })
   | (AuthenticatedView & { kind: "api-docs"; origin: string; tools?: { name: string; description: string }[] })
   | (AuthenticatedView & { kind: "audit"; entries: AuditView[] })
-  | { kind: "invite"; invitationToken: string; accountName: string; username: string; role: AccountRole; expiresAt: number; existingUser: boolean; signedIn?: boolean; csrfToken: string; error?: string }
+  | { kind: "invite"; invitationToken: string; accountName: string; username: string; role: AccountRole; expiresAt: number; identityStatus: InvitationPreview["identityStatus"]; signedIn?: boolean; csrfToken: string; error?: string }
   | { kind: "public-status"; page: PublicStatusView }
   | { kind: "error"; status: number; error: string };

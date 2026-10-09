@@ -3,11 +3,13 @@ import { parse as parsePgConnection } from "pg-connection-string";
 import { readFile } from "node:fs/promises";
 import { createAccountService } from "./engine";
 import { createIdentity } from "./identity";
+import { emailIdentity } from "./auth";
 import type { IdentityConfig, IdentityService, ProvisionInput } from "./identity";
 import type { PgDatabase } from "./database";
 import type { Env } from "./runtime-types";
 import type { ProberService } from "./egress";
 import { dispatchOutbox, tickAccounts } from "./worker";
+import { admitMail, validateMailBudget } from "./mail-admission";
 
 export interface RuntimeConfig {
   database: PgDatabase;
@@ -26,6 +28,8 @@ export interface RuntimeConfig {
   google?: IdentityConfig["google"];
   signupEnabled?: boolean;
   legacyMigration?: IdentityConfig["legacyMigration"];
+  mailBudget?: IdentityConfig["mailBudget"];
+  workloadsEnabled?: boolean;
   owner?: ProvisionInput;
 }
 
@@ -48,11 +52,12 @@ export async function createRuntime(config: RuntimeConfig): Promise<TomatoRuntim
   } else if (origin.protocol !== "https:" || !config.prober) throw new Error("production_requires_https_and_prober");
   if (config.authSecret.length < 32 || config.engineToken.length < 32) throw new Error("invalid_runtime_secrets");
   if (Buffer.from(config.dataKey, "base64").length !== 32) throw new Error("invalid_data_encryption_key");
+  if (config.mailBudget) validateMailBudget(config.mailBudget);
   const role = await config.database.query<{ rolsuper: boolean; rolbypassrls: boolean }>("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
   if (!role[0] || role[0].rolsuper || role[0].rolbypassrls) throw new Error("runtime_database_role_must_enforce_rls");
   const identity = config.identity ?? createIdentity(config.database, {
     baseURL: config.origin, secret: config.authSecret, allowLoopback: config.allowLoopback,
-    signupEnabled: config.signupEnabled ?? false, smtp: config.smtp, github: config.github, google: config.google, legacyMigration: config.legacyMigration,
+    signupEnabled: config.signupEnabled ?? false, smtp: config.smtp, github: config.github, google: config.google, legacyMigration: config.legacyMigration, mailBudget: config.mailBudget,
   });
   const smtp = config.smtp ? nodemailer.createTransport({ host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, requireTLS: !config.smtp.secure,
     connectionTimeout: 5000, greetingTimeout: 5000, socketTimeout: 10000, dnsTimeout: 5000,
@@ -63,6 +68,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<TomatoRuntim
   const env: Env = {
     database: config.database, identity, accounts: undefined as unknown as Env["accounts"], MODE: mode,
     AUTH_SECRET: config.authSecret, DATA_KEY: config.dataKey, ENGINE_TOKEN: config.engineToken, PROBER: config.prober,
+    WORKLOADS_ENABLED: config.workloadsEnabled ?? true,
     ASSETS: {
       async fetch(input, init) {
         const request = input instanceof Request ? input : new Request(input, init);
@@ -78,7 +84,13 @@ export async function createRuntime(config: RuntimeConfig): Promise<TomatoRuntim
     },
     ...(config.allowLoopback ? { TEST_MODE: true, TEST_DNS_RESOLVER: config.resolverUrl, TEST_MIN_INTERVAL_MS: String(config.minIntervalMs ?? 1000) } : {}),
     ...(smtp && config.smtp ? { EMAIL_FROM: config.smtp.from, EMAIL: {
-      async send(message) { await smtp.sendMail({ from: { address: message.from.email, name: message.from.name }, to: message.to, subject: message.subject, text: message.text, headers: message.headers }); },
+      async send(message) {
+        if (config.workloadsEnabled === false) throw new Error("monitoring_workloads_disabled");
+        await admitMail(config.database, config.mailBudget);
+        const recipient = emailIdentity(message.to);
+        const result = await smtp.sendMail({ from: config.smtp!.from, to: { address: recipient, name: "" }, subject: message.subject, text: message.text, headers: message.headers });
+        if (!result.accepted.some(address => String(address).toLowerCase() === recipient)) throw new Error("smtp_recipient_not_accepted");
+      },
     } } : {}),
   };
   env.accounts = createAccountService(config.database, env);
@@ -104,7 +116,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<TomatoRuntim
   return {
     env, identity,
     startBackground() {
-      if (started || stopping) return;
+      if (started || stopping || config.workloadsEnabled === false) return;
       started = true;
       tickWork = tick(); dispatchWork = dispatch();
     },

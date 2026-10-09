@@ -3,9 +3,10 @@ import { isIP } from "node:net";
 import { hashPassword } from "better-auth/crypto";
 import { isAPIError } from "better-auth/api";
 import { createAuth, emailIdentity, type ControlledOAuthConfig, type IdentityConfig, type ProvisionInput } from "./auth";
+import { createLegacyEnrollment } from "./identity-enrollment";
 import type { PgDatabase, PgTransaction } from "./database";
 import { ApiError, body, digest, identifier, integer, json } from "./validation";
-import type { AccountRole, AccountSummary, ApiKeyScope, ApiKeyView, AuditView, InvitationView, Principal } from "./product-types";
+import type { AccountRole, AccountSummary, ApiKeyScope, ApiKeyView, AuditView, InvitationView, InvitationPreview, Principal } from "./product-types";
 export type { ControlledOAuthConfig, IdentityConfig, ProvisionInput } from "./auth";
 export interface IdentityService {
   fetch(request: Request): Promise<Response>;
@@ -13,12 +14,12 @@ export interface IdentityService {
   provision(input: ProvisionInput): Promise<{ account: AccountSummary; owner: { id: string; username: string } }>;
   ensureBootstrapOwner(input: ProvisionInput): Promise<{ account: AccountSummary; owner: { id: string; username: string } }>;
   drain(): Promise<void>;
-  capabilities: { signup: boolean; email: boolean; github: boolean; google: boolean };
+  capabilities: { signup: boolean; email: boolean; github: boolean; google: boolean; enrollment: boolean };
 }
 type Queryable = Pick<PgTransaction, "query">;
 type UserRow = { id: string; email: string; emailVerified: boolean };
 type KeyRow = { id: string; user_id: string; account_id: string; token_hash: string; name: string; scope: ApiKeyScope; created_at: number; expires_at: number; last_used_at: number | null; parent_key_id: string | null };
-type InviteRow = { id: string; account_id: string; email: string; role: AccountRole; token_hash: string; created_at: number; expires_at: number; status: "pending" | "accepted" | "revoked" };
+type InviteRow = { id: string; account_id: string; email: string | null; legacy_username?: string | null; role: AccountRole; token_hash: string; created_at: number; expires_at: number; status: "pending" | "accepted" | "revoked" };
 type McpRow = { id: string; user_id: string; account_id: string; auth_binding: string; protocol_version: string; expires_at: number; initialized: boolean };
 const LEVEL: Record<ApiKeyScope, number> = { read: 0, write: 1, manage: 2 };
 const PROTOCOL = "2025-11-25";
@@ -28,13 +29,14 @@ function credentialPassword(value: unknown): string { if (typeof value !== "stri
 function role(value: unknown): AccountRole { if (value !== "owner" && value !== "editor" && value !== "viewer") throw new ApiError(400, "invalid_role"); return value; }
 function auditKey(input: Record<string, unknown>): string | null { const key = input.apiKeyId ?? input.sourceKeyId; return key === undefined || key === null ? null : identifier(String(key)); }
 function keyView(row: KeyRow): ApiKeyView { return { id: row.id, name: row.name, scope: row.scope, createdAt: row.created_at, expiresAt: row.expires_at, lastUsedAt: row.last_used_at, parentKeyId: row.parent_key_id }; }
-function inviteView(row: InviteRow): InvitationView { return { id: row.id, username: row.email, role: row.role, createdAt: row.created_at, expiresAt: row.expires_at, status: row.status === "pending" && row.expires_at <= Date.now() ? "expired" : row.status }; }
+function inviteView(row: InviteRow): InvitationView { return { id: row.id, username: row.email ?? row.legacy_username!, role: row.role, createdAt: row.created_at, expiresAt: row.expires_at, status: row.status === "pending" && row.expires_at <= Date.now() ? "expired" : row.status }; }
 export function createIdentity(database: PgDatabase, config: IdentityConfig): IdentityService { return createIdentityService(database, config); }
 /** Never selectable by production environment/config; actual TLS controlled IdP acceptance only. */
 export function createControlledOAuthIdentity(database: PgDatabase, config: IdentityConfig, provider: ControlledOAuthConfig): IdentityService { return createIdentityService(database, config, provider); }
 function createIdentityService(database: PgDatabase, config: IdentityConfig, controlled?: ControlledOAuthConfig): IdentityService {
   const maintained = createAuth(database, config, controlled);
-  const user = async (db: Queryable, id: string): Promise<UserRow> => { const row = (await db.query<UserRow>('SELECT id,email,"emailVerified" FROM public.auth_user WHERE id=$1', [id]))[0]; if (!row) throw new ApiError(404, "user_not_found"); return row; };
+  const enrollment = createLegacyEnrollment(database, config, maintained.sendEnrollment);
+  const user = async (db: Queryable, id: string): Promise<UserRow> => { const row = (await db.query<UserRow>('SELECT s.id,COALESCE(u.email,s.display_name) AS email,COALESCE(u."emailVerified",false) AS "emailVerified" FROM identity.subjects s LEFT JOIN public.auth_user u ON u.id=s.id WHERE s.id=$1', [id]))[0]; if (!row) throw new ApiError(404, "user_not_found"); return row; };
   const memberships = (db: Queryable, userId: string) => db.query<AccountSummary>("SELECT a.id,a.name,m.role FROM engine.accounts a JOIN identity.members m ON a.id=m.account_id WHERE m.user_id=$1 ORDER BY a.name,a.id", [userId]);
   const appendAudit = async (db: Queryable, accountId: string, actor: string, action: string, subject: string, key: string | null = null) => { await db.query("INSERT INTO identity.audit(id,account_id,actor,action,subject,occurred_at,api_key_id) VALUES($1,$2,$3,$4,$5,$6,$7)", [crypto.randomUUID(), accountId, actor, action, subject, Date.now(), key]); };
   const ensureVerifiedWorkspace = async (userId: string, sessionId: string): Promise<AccountSummary[]> => {
@@ -44,7 +46,7 @@ function createIdentityService(database: PgDatabase, config: IdentityConfig, con
       const owner = (await client.query<{ name: string; email: string; emailVerified: boolean }>('SELECT name,email,"emailVerified" FROM public.auth_user WHERE id=$1 FOR UPDATE', [userId])).rows[0];
       if (!owner?.emailVerified || !(await client.query('SELECT id FROM public.auth_session WHERE id=$1 AND "userId"=$2 AND "expiresAt">NOW() FOR SHARE', [sessionId, userId])).rowCount) throw new ApiError(401, "unauthorized");
       const accounts = (await client.query<AccountSummary>("SELECT a.id,a.name,m.role FROM engine.accounts a JOIN identity.members m ON a.id=m.account_id WHERE m.user_id=$1 ORDER BY a.name,a.id", [userId])).rows;
-      if (!accounts.length) {
+      if (!accounts.length && !(await client.query<{ imported: boolean }>("SELECT imported FROM identity.subjects WHERE id=$1", [userId])).rows[0]?.imported) {
         const id = crypto.randomUUID(), name = `${owner.name}'s workspace`.slice(0, 120);
         await client.query("INSERT INTO engine.accounts(id,name) VALUES($1,$2)", [id, name]);
         await client.query("INSERT INTO identity.members(account_id,user_id,role) VALUES($1,$2,'owner')", [id, userId]);
@@ -111,6 +113,11 @@ function createIdentityService(database: PgDatabase, config: IdentityConfig, con
   const mcpView = (row: McpRow) => ({ sessionId: row.id, protocolVersion: row.protocol_version, expiresAt: row.expires_at, initialized: row.initialized });
   const dispatch = async (path: string, input: Record<string, unknown>): Promise<unknown> => {
     if (path === "/authenticate") return authenticate(input);
+    if (path === "/enrollment/start") return enrollment.start(input);
+    if (path === "/enrollment/invitation") return enrollment.startInvitation(input);
+    if (path === "/enrollment/status") return enrollment.status(input.claim);
+    if (path === "/enrollment/contact") return enrollment.contact(input);
+    if (path === "/enrollment/complete") return enrollment.complete(input);
     if (path === "/provision") {
       if (!input.owner || typeof input.owner !== "object" || Array.isArray(input.owner)) throw new ApiError(400, "invalid_owner");
       const owner = input.owner;
@@ -143,9 +150,14 @@ function createIdentityService(database: PgDatabase, config: IdentityConfig, con
       else await database.query('DELETE FROM public.auth_session WHERE "userId"=$1 AND ($2::text IS NULL OR id<>$2)', [userId, typeof input.sessionId === "string" ? input.sessionId : null]);
       return { revoked: true };
     }
-    if (path === "/invitations/preview") { const row = await invitation(database, input.token), account = (await database.query<{ name: string }>("SELECT name FROM engine.accounts WHERE id=$1", [row.account_id]))[0]; return { invitation: inviteView(row), accountName: account!.name, existingUser: Boolean((await database.query("SELECT id FROM public.auth_user WHERE email=$1", [row.email])).length) }; }
+    if (path === "/invitations/preview") {
+      const row = await invitation(database, input.token), account = (await database.query<{ name: string }>("SELECT name FROM engine.accounts WHERE id=$1", [row.account_id]))[0];
+      const user = row.email ? (await database.query<{ emailVerified: boolean }>('SELECT "emailVerified" FROM public.auth_user WHERE email=$1', [row.email]))[0] : undefined;
+      const preview: InvitationPreview = { invitation: inviteView(row), accountName: account!.name, identityStatus: user ? user.emailVerified ? "verified" : "unverified" : "new", legacyUsername: row.legacy_username ?? null, legacyExisting: row.legacy_username ? Boolean((await database.query("SELECT user_id FROM identity.legacy_enrollment WHERE username=$1", [row.legacy_username])).length) : false };
+      return preview;
+    }
     if (path === "/invitations/register") {
-      const row = await invitation(database, input.token); if (!config.smtp) throw new ApiError(503, "smtp_not_configured");
+      const row = await invitation(database, input.token); if (!config.smtp) throw new ApiError(503, "smtp_not_configured"); if (!row.email) throw new ApiError(403, "legacy_invitation_enrollment_required");
       const clientIp = typeof input.trustedClientIp === "string" ? input.trustedClientIp : "", ipVersion = isIP(clientIp);
       if (!ipVersion) throw new ApiError(503, "trusted_caller_address_required");
       const canonicalIp = ipVersion === 6 ? new URL(`http://[${clientIp}]/`).hostname : clientIp;
@@ -158,7 +170,30 @@ function createIdentityService(database: PgDatabase, config: IdentityConfig, con
       // Native Better Auth APIs run maintained hooks, not the HTTP router's rate limiter.
       // Commit admission first: genuine SMTP failures still consume the invitation/caller budget.
       const callbackURL = new URL("/login", config.baseURL); callbackURL.searchParams.set("next", `/invite/${String(input.token)}`);
-      await maintained.auth.api.signUpEmail({ headers: { Origin: callbackURL.origin, "X-Tomato-Client-IP": clientIp }, body: { email: row.email, name: text(input.name, "name"), password: credentialPassword(input.password), callbackURL: callbackURL.href } });
+      const password = credentialPassword(input.password), headers = { Origin: callbackURL.origin, "X-Tomato-Client-IP": clientIp };
+      const existing = (await database.query<{ id: string; emailVerified: boolean }>('SELECT id,"emailVerified" FROM public.auth_user WHERE email=$1', [row.email]))[0];
+      const resendVerification = async () => {
+        const current = (await database.query<{ emailVerified: boolean }>('SELECT "emailVerified" FROM public.auth_user WHERE email=$1', [row.email]))[0];
+        if (current?.emailVerified) throw new ApiError(409, "use_existing_account_login");
+        // A retry proves the retained password and really resends; it never replaces it.
+        await maintained.withMailDelivery(async () => {
+          try {
+            const signedIn = await maintained.auth.api.signInEmail({ headers, body: { email: row.email!, password, callbackURL: callbackURL.href } });
+            // Verification may win the precheck race. Do not leak its new session or claim a send.
+            await database.query('DELETE FROM public.auth_session WHERE token=$1 AND "userId"=$2', [signedIn.token, signedIn.user.id]);
+            throw new ApiError(409, "use_existing_account_login");
+          } catch (error) {
+            if (!isAPIError(error) || error.body?.code !== "EMAIL_NOT_VERIFIED") throw error;
+          }
+        });
+      };
+      if (existing) await resendVerification();
+      else {
+        const registered = await maintained.withMailDelivery(() => maintained.auth.api.signUpEmail({ headers, body: { email: row.email!, name: text(input.name, "name"), password, callbackURL: callbackURL.href } }));
+        const persisted = (await database.query<{ id: string }>("SELECT id FROM public.auth_user WHERE email=$1", [row.email]))[0];
+        // Better Auth returns a synthetic user when a competing signup already owns this email.
+        if (registered.user.id !== persisted?.id) await resendVerification();
+      }
       return { verificationRequired: true };
     }
     if (path === "/invitations/accept") {
@@ -182,7 +217,7 @@ function createIdentityService(database: PgDatabase, config: IdentityConfig, con
       if (path === "/workspace/get") return { account: membership };
       if (path === "/workspace/rename") { const name = text(input.name, "account_name"); await tx.query("UPDATE engine.accounts SET name=$1 WHERE id=$2", [name, accountId]); await appendAudit(tx, accountId, actor.id, "account.rename", accountId, auditKey(input)); return { account: { ...membership, name } }; }
       if (path === "/management/admit") { const credential = input.apiKeyId ?? input.authSessionId; if (typeof credential !== "string") throw new ApiError(401, "unauthorized"); const key = `management:${actor.id}:${credential}`; const row = (await tx.query<{ count: number; expires_at: number }>("INSERT INTO identity.attempts(key,count,expires_at) VALUES($1,1,$2) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN identity.attempts.expires_at<=$3 THEN 1 ELSE identity.attempts.count+1 END,expires_at=CASE WHEN identity.attempts.expires_at<=$3 THEN excluded.expires_at ELSE identity.attempts.expires_at END RETURNING count,expires_at", [key, now + 60000, now]))[0]!; if (row.count > 120) throw new ApiError(429, "management_rate_limited"); return { admitted: true, limit: 120, resetsAt: row.expires_at }; }
-      if (path === "/members") return { members: await tx.query('SELECT u.id AS "userId",u.email AS username,m.role FROM identity.members m JOIN public.auth_user u ON u.id=m.user_id WHERE m.account_id=$1 ORDER BY u.email', [accountId]) };
+      if (path === "/members") return { members: await tx.query('SELECT s.id AS "userId",COALESCE(u.email,s.display_name) AS username,m.role FROM identity.members m JOIN identity.subjects s ON s.id=m.user_id LEFT JOIN public.auth_user u ON u.id=s.id WHERE m.account_id=$1 ORDER BY username', [accountId]) };
       if (path === "/members/change") {
         const userId = identifier(String(input.userId ?? "")), next = input.remove === true ? null : role(input.role), member = (await tx.query<{ role: AccountRole }>("SELECT role FROM identity.members WHERE account_id=$1 AND user_id=$2", [accountId, userId]))[0];
         if (!member) throw new ApiError(404, "member_not_found");
@@ -232,7 +267,7 @@ function createIdentityService(database: PgDatabase, config: IdentityConfig, con
       throw new ApiError(404, "not_found");
     });
   };
-  return { capabilities: { signup: Boolean(config.signupEnabled), email: Boolean(config.smtp), github: Boolean(config.github), google: Boolean(config.google) }, provision: maintained.provision, ensureBootstrapOwner: maintained.ensureBootstrapOwner, authHandler: maintained.authHandler, drain: maintained.drain, fetch: async request => {
+  return { capabilities: { signup: Boolean(config.signupEnabled), email: Boolean(config.smtp), github: Boolean(config.github), google: Boolean(config.google), enrollment: Boolean(config.legacyMigration && config.smtp) }, provision: maintained.provision, ensureBootstrapOwner: maintained.ensureBootstrapOwner, authHandler: maintained.authHandler, drain: maintained.drain, fetch: async request => {
     try { if (request.method !== "POST") throw new ApiError(405, "method_not_allowed"); return json(await dispatch(new URL(request.url).pathname, await body(request))); }
     catch (error) { if (error instanceof ApiError) return json({ error: error.message }, error.status); if (isAPIError(error)) return json({ error: error.body?.message ?? "authentication_failed" }, error.statusCode); throw error; }
   } };

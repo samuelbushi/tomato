@@ -178,7 +178,7 @@ try {
     ];
     let identity: IdentityService | undefined;
     try {
-      await assert.rejects(importLegacyIdentity(legacy.database, { export: source, emailMap: {}, migration, acknowledgeLegacySessionInvalidation: true }), /real_email_mapping_required/);
+      await assert.rejects(importLegacyIdentity(legacy.database, { export: source, emailMap: { "old-username": { email: "actual@example.test", name: "", emailVerified: true } }, migration, acknowledgeLegacySessionInvalidation: true }), /real_email_mapping_required/);
       await importLegacyIdentity(legacy.database, { export: source, emailMap: { "old-username": { email: "legacy-owner@example.test", name: "Legacy Owner", emailVerified: true } }, migration, acknowledgeLegacySessionInvalidation: true });
       await assert.rejects(finalizeLegacyIdentityCutover(legacy.database), /legacy_cutover_not_complete/);
       identity = createIdentity(legacy.database, { baseURL: legacy.baseUrl, allowLoopback: true, secret: legacy.env.AUTH_SECRET, legacyMigration: migration });

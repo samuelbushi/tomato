@@ -14,7 +14,7 @@ export class AccountEngine {
         this.secrets = new AccountSecrets(env.DATA_KEY, accountId);
     }
     async handle(request: Request): Promise<Response> {
-        await this.advanceMaintenance(Date.now());
+        if (this.env.WORKLOADS_ENABLED !== false) await this.advanceMaintenance(Date.now());
         const account = request.headers.get("X-Tomato-Account");
         if (account && account !== this.accountId)
             throw new ApiError(403, "account_mismatch");
@@ -1367,6 +1367,7 @@ export function createAccountService(database: PgDatabase, env: Env) {
         async fetch(accountId: string, input: Request | string, init?: RequestInit): Promise<Response> {
             const request = input instanceof Request ? input : new Request(input, init);
             try {
+                if (env.WORKLOADS_ENABLED === false && request.method !== "GET" && request.method !== "HEAD") throw new ApiError(503, "monitoring_workloads_disabled");
                 return await database.transaction(accountId, async (tx) => {
                     await tx.query("INSERT INTO wallet(id,balance,reserved,usage,missed,archive_sequence) VALUES(1,0,0,0,0,0) ON CONFLICT DO NOTHING");
                     await tx.query("INSERT INTO metadata(key,value) VALUES('heartbeat-usage','0') ON CONFLICT DO NOTHING");

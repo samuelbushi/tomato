@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { types, type Pool, type PoolClient, type QueryResultRow } from "pg";
+import { types, Pool, type PoolClient, type QueryResultRow } from "pg";
 import { ApiError, identifier } from "./validation";
 
 types.setTypeParser(20, value => {
@@ -21,13 +21,24 @@ export class PgTransaction {
  * No callback performs probe, SMTP, webhook or archive compression I/O.
  */
 export class PgDatabase {
+  private admissionPool?: Pool;
+  private readonly onIdleError = (error: Error) => {
+    const code = "code" in error && typeof error.code === "string" && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : "unknown";
+    console.error(`tomato_database_idle_connection_error:${code}`);
+  };
   constructor(readonly pool: Pool) {
-    // pg evicts a failed idle connection; active query/transaction errors still reject.
-    // Its required error event must never crash Node or print the attached Client.
-    pool.on("error", error => {
-      const code = "code" in error && typeof error.code === "string" && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : "unknown";
-      console.error(`tomato_database_idle_connection_error:${code}`);
-    });
+    // pg evicts a failed idle connection; never print the attached Client.
+    pool.on("error", this.onIdleError);
+  }
+  /** SMTP callbacks can run inside identity transactions holding every main client.
+   * Admission commits independently, so a later rollback cannot refund a sent envelope.
+   */
+  get mailAdmissionPool(): Pool {
+    if (!this.admissionPool) {
+      this.admissionPool = new Pool({ ...this.pool.options, password: this.pool.options.password, max: 1, min: 0, application_name: "tomato-mail-admission" });
+      this.admissionPool.on("error", this.onIdleError);
+    }
+    return this.admissionPool;
   }
   async query<T = QueryResultRow>(sql: string, values: unknown[] = []): Promise<T[]> {
     return (await this.pool.query(sql, values)).rows as T[];
@@ -75,5 +86,8 @@ export class PgDatabase {
       client.release();
     }
   }
-  async close(): Promise<void> { await this.pool.end(); }
+  async close(): Promise<void> {
+    if (this.admissionPool) await Promise.all([this.pool.end(), this.admissionPool.end()]);
+    else await this.pool.end();
+  }
 }

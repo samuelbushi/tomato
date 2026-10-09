@@ -19,6 +19,8 @@ export interface Env {
   ASSETS?: Fetcher;
   ENGINE_TOKEN: string;
   MODE: "self-host" | "hosted";
+  /** Operator staging freeze: no monitoring execution, ledger mutation or alert dispatch. */
+  WORKLOADS_ENABLED?: boolean;
   ARCHIVE_RETENTION_DAYS?: number;
   /** Available only in isolated, locally owned protocol fixtures; never shared production. */
   TEST_MODE?: boolean;

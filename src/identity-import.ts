@@ -5,7 +5,7 @@ import { identifier, integer } from "./validation";
 import type { AccountRole, ApiKeyScope } from "./product-types";
 import { legacyCredential, verifyCutoverPassword, validateLegacyMigration, type LegacyMigrationConfig } from "./identity-legacy";
 
-/** One-shot approved cutover. Legacy verification remains exclusively inside Better Auth until the explicit deadline. */
+/** One-shot identity cutover; unmapped users retain only restricted contact-enrollment proof. */
 export interface LegacyIdentityExport {
   users: { id: string; username: string; salt: string; verifier: string }[];
   accounts: { id: string; name: string }[];
@@ -19,8 +19,8 @@ export interface LegacyIdentityExport {
 export interface LegacyEmailMapping { email: string; name: string; emailVerified: boolean }
 export interface IdentityCutoverInput {
   export: LegacyIdentityExport;
-  /** Every legacy username, including invitation-only names, must have a real mapping. */
-  emailMap: Record<string, LegacyEmailMapping>;
+  /** Optional approved actual contacts; unmapped usernames enroll themselves after cutover. */
+  emailMap?: Record<string, LegacyEmailMapping>;
   /** Supplied by each user through an approved cutover process; never persisted or logged. */
   passwordProofs?: Record<string, string>;
   migration: LegacyMigrationConfig;
@@ -30,18 +30,25 @@ function requireText(value: unknown): asserts value is string { if (typeof value
 function validRole(value: unknown): asserts value is AccountRole { if (value !== "owner" && value !== "editor" && value !== "viewer") throw new Error("invalid_identity_export_role"); }
 function timestamp(value: unknown): number { return integer(value, 0, Number.MAX_SAFE_INTEGER, "identity_export_timestamp"); }
 export async function importLegacyIdentity(database: PgDatabase, input: IdentityCutoverInput): Promise<{ users: number; accounts: number; keys: number; legacySessionsInvalidated: true }> {
-  if (!input || input.acknowledgeLegacySessionInvalidation !== true) throw new Error("approved_email_mapping_export_pepper_and_deadline_required");
+  if (!input || input.acknowledgeLegacySessionInvalidation !== true) throw new Error("approved_identity_export_pepper_and_deadline_required");
   validateLegacyMigration(input.migration);
   const source = input.export;
   if (!source || ![source.users, source.accounts, source.members, source.api_keys, source.invitations, source.slugs, source.audit, source.mcp_sessions].every(Array.isArray)) throw new Error("complete_identity_export_required");
-  const users = new Map<string, { email: string; name: string; emailVerified: boolean; password: string }>(), accounts = new Set<string>(), emailOwners = new Set<string>();
-  const mapping = (username: string): LegacyEmailMapping => { requireText(username); const row = input.emailMap[username]; if (!row || typeof row.name !== "string" || !row.name.trim() || typeof row.emailVerified !== "boolean") throw new Error("real_email_mapping_required"); return { email: emailIdentity(row.email), name: row.name.trim(), emailVerified: row.emailVerified }; };
+  const users = new Map<string, { username: string; contact?: LegacyEmailMapping; password: string }>(), usernames = new Set<string>(), accounts = new Set<string>(), emailOwners = new Set<string>();
+  const mapping = (username: string): LegacyEmailMapping | undefined => {
+    requireText(username);
+    if (!input.emailMap || !Object.hasOwn(input.emailMap, username)) return undefined;
+    const row = input.emailMap[username];
+    if (!row || typeof row.name !== "string" || !row.name.trim() || typeof row.emailVerified !== "boolean") throw new Error("real_email_mapping_required");
+    return { email: emailIdentity(row.email), name: row.name.trim(), emailVerified: row.emailVerified };
+  };
   for (const row of source.users) {
-    identifier(row.id); requireText(row.salt); requireText(row.verifier);
+    identifier(row.id); requireText(row.salt); requireText(row.verifier); requireText(row.username);
     const actual = mapping(row.username), proof = input.passwordProofs?.[row.id], legacy = legacyCredential(row.salt, row.verifier);
-    if (users.has(row.id) || emailOwners.has(actual.email)) throw new Error("ambiguous_legacy_email_mapping");
-    if (proof !== undefined && (typeof proof !== "string" || proof.length < 14 || Buffer.byteLength(proof) > 256 || !await verifyCutoverPassword({ hash: legacy, password: proof }, input.migration))) throw new Error("legacy_password_proof_failed");
-    users.set(row.id, { ...actual, password: proof === undefined ? legacy : await hashPassword(proof) }); emailOwners.add(actual.email);
+    if (users.has(row.id) || usernames.has(row.username) || (actual && emailOwners.has(actual.email))) throw new Error("ambiguous_legacy_identity_mapping");
+    if (proof !== undefined && (typeof proof !== "string" || !proof || Buffer.byteLength(proof) > 256 || !await verifyCutoverPassword({ hash: legacy, password: proof }, input.migration))) throw new Error("legacy_password_proof_failed");
+    users.set(row.id, { username: row.username, contact: actual, password: actual && proof !== undefined ? await hashPassword(proof) : legacy }); usernames.add(row.username);
+    if (actual) emailOwners.add(actual.email);
   }
   for (const row of source.accounts) { identifier(row.id); requireText(row.name); if (accounts.has(row.id)) throw new Error("duplicate_legacy_account"); accounts.add(row.id); }
   for (const row of source.members) { validRole(row.role); if (!users.has(row.user_id) || !accounts.has(row.account_id)) throw new Error("invalid_legacy_membership"); }
@@ -61,20 +68,35 @@ export async function importLegacyIdentity(database: PgDatabase, input: Identity
   const client = await database.pool.connect();
   try {
     await client.query("BEGIN"); await client.query("SELECT pg_advisory_xact_lock(746662092)");
-    if ((await client.query("SELECT id FROM public.auth_user LIMIT 1")).rowCount || (await client.query("SELECT user_id FROM identity.members LIMIT 1")).rowCount) throw new Error("identity_cutover_requires_empty_target_identity");
+    if ((await client.query("SELECT id FROM identity.subjects LIMIT 1")).rowCount || (await client.query("SELECT user_id FROM identity.members LIMIT 1")).rowCount) throw new Error("identity_cutover_requires_empty_target_identity");
     for (const row of source.accounts) {
       const existing = await client.query<{ name: string }>("SELECT name FROM engine.accounts WHERE id=$1 FOR UPDATE", [row.id]);
       if (existing.rows[0] && existing.rows[0].name !== row.name) throw new Error("legacy_account_mapping_conflict");
       await client.query("INSERT INTO engine.accounts(id,name) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", [row.id, row.name]);
     }
     for (const [id, row] of users) {
-      await client.query('INSERT INTO public.auth_user(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,$4,NOW(),NOW())', [id, row.name, row.email, row.emailVerified]);
-      await client.query(`INSERT INTO public.auth_account(id,"accountId","providerId","userId",password,"createdAt","updatedAt") VALUES($1,$2,'credential',$2,$3,NOW(),NOW())`, [crypto.randomUUID(), id, row.password]);
+      await client.query("INSERT INTO identity.subjects(id,display_name,imported) VALUES($1,$2,true)", [id, row.username]);
+      if (row.contact) {
+        await client.query('INSERT INTO public.auth_user(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,$4,NOW(),NOW())', [id, row.contact.name, row.contact.email, row.contact.emailVerified]);
+        await client.query(`INSERT INTO public.auth_account(id,"accountId","providerId","userId",password,"createdAt","updatedAt") VALUES($1,$2,'credential',$2,$3,NOW(),NOW())`, [crypto.randomUUID(), id, row.password]);
+      } else {
+        await client.query("INSERT INTO identity.legacy_enrollment(user_id,username,credential) VALUES($1,$2,$3)", [id, row.username, row.password]);
+      }
     }
     for (const row of source.members) await client.query("INSERT INTO identity.members(account_id,user_id,role) VALUES($1,$2,$3)", [row.account_id, row.user_id, row.role]);
     for (const row of source.api_keys) await client.query("INSERT INTO identity.api_keys(id,user_id,account_id,token_hash,name,scope,created_at,expires_at,last_used_at,parent_key_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL)", [row.id, row.user_id, row.account_id, row.token_hash, row.name, row.scope, row.created_at, row.expires_at, row.last_used_at]);
     for (const row of source.api_keys) if (row.parent_key_id) await client.query("UPDATE identity.api_keys SET parent_key_id=$1 WHERE id=$2", [row.parent_key_id, row.id]);
-    for (const row of source.invitations) await client.query("INSERT INTO identity.invitations(id,account_id,email,role,token_hash,created_at,expires_at,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [row.id, row.account_id, mapping(row.username).email, row.role, row.token_hash, row.created_at, row.expires_at, row.status]);
+    const invitationTargets = new Set<string>();
+    for (const row of source.invitations) {
+      const contact = mapping(row.username);
+      if (!contact && !usernames.has(row.username) && !invitationTargets.has(row.username)) {
+        const id = crypto.randomUUID();
+        await client.query("INSERT INTO identity.subjects(id,display_name,imported) VALUES($1,$2,true)", [id, row.username]);
+        await client.query("INSERT INTO identity.legacy_invite_targets(user_id,username) VALUES($1,$2)", [id, row.username]);
+        invitationTargets.add(row.username);
+      }
+      await client.query("INSERT INTO identity.invitations(id,account_id,email,legacy_username,role,token_hash,created_at,expires_at,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [row.id, row.account_id, contact?.email ?? null, contact ? null : row.username, row.role, row.token_hash, row.created_at, row.expires_at, row.status]);
+    }
     for (const row of source.slugs) await client.query("INSERT INTO identity.slugs(slug,account_id) VALUES($1,$2)", [row.slug, row.account_id]);
     for (const row of source.audit) await client.query("INSERT INTO identity.audit(id,account_id,actor,action,subject,occurred_at,api_key_id) VALUES($1,$2,$3,$4,$5,$6,$7)", [row.id, row.account_id, row.actor, row.action, row.subject, row.occurred_at, row.api_key_id ?? null]);
     for (const row of source.mcp_sessions) {

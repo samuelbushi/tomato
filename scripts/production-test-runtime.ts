@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer, type Server } from "node:http";
+import { promisify } from "node:util";
 import pg from "pg";
+import { parseIntoClientConfig } from "pg-connection-string";
 import { PgDatabase } from "../src/database.ts";
 import { createRuntime, type RuntimeConfig, type TomatoRuntime } from "../src/runtime.ts";
-import { createHttpServer } from "../src/server.ts";
+import { createHttpServer, type HttpServerOptions } from "../src/server.ts";
 import { createProber } from "../src/egress.ts";
 import { tickAccounts, dispatchOutbox } from "../src/worker.ts";
 import type { Env } from "../src/runtime-types.ts";
@@ -26,13 +28,16 @@ export interface ProductionTestRuntime {
   startConsumer(): void;
   stopConsumer(): Promise<void>;
   restart(): Promise<void>;
+  recover?: () => Promise<void>;
   close(): Promise<void>;
 }
 export interface ProductionTestOptions {
   background?: boolean;
+  databaseConnections?: number;
   env?: Partial<Env>;
   fixtures?: Fixtures;
   runtime?: Partial<Omit<RuntimeConfig, "database" | "origin" | "authSecret" | "dataKey" | "engineToken" | "prober" | "allowLoopback">>;
+  httpServer?: HttpServerOptions;
 }
 
 /** Every suite owns an independent database and non-bypass role; no shared data is reset. */
@@ -46,7 +51,10 @@ export async function createProductionTestRuntime(options: ProductionTestOptions
   const admin = new pg.Pool({ connectionString: adminUrl.href, max: 1 });
   const dbUrl = new URL(adminUrl);
   dbUrl.pathname = `/${id}`; dbUrl.username = id; dbUrl.password = password;
-  const database = new PgDatabase(new pg.Pool({ connectionString: dbUrl.href, max: 12 }));
+  const connections = options.databaseConnections ?? 12;
+  assert(Number.isSafeInteger(connections) && connections >= 1 && connections <= 12, "Invalid owned runtime connection bound");
+  const parameters = parseIntoClientConfig(dbUrl.href);
+  const database = new PgDatabase(new pg.Pool({ ...parameters, max: connections, connectionTimeoutMillis: 2000 }));
   const token = randomBytes(32).toString("hex");
   const authSecret = randomBytes(32).toString("hex");
   const dataKey = randomBytes(32).toString("base64");
@@ -152,7 +160,7 @@ export async function createProductionTestRuntime(options: ProductionTestOptions
       Object.assign(current.env, options.env);
       // Mandatory isolation controls cannot be disabled by consumer options.
       current.env.database = database; current.env.PROBER = prober; current.env.TEST_MODE = true; current.env.DATA_KEY = dataKey;
-      server = createHttpServer(current, baseUrl);
+      server = createHttpServer(current, baseUrl, options.httpServer);
       await listen(server, port);
     };
     await initialize();
@@ -192,6 +200,30 @@ export async function createProductionTestRuntime(options: ProductionTestOptions
         await closeServer(server); await current!.stop(); await initialize();
         running = resume; schedule();
       },
+      ...(process.env.TEST_DATABASE_RECOVERY_CONTAINER ? { recover: async () => {
+        const container = process.env.TEST_DATABASE_RECOVERY_CONTAINER!, command = promisify(execFile);
+        if (!/^[A-Za-z0-9_-]{1,100}$/.test(container)) throw new Error("owned_recovery_container_required");
+        const label = (await command("docker", ["inspect", "--format", '{{index .Config.Labels "org.tomato.proof"}}', container], { timeout: 10000 })).stdout.trim();
+        if (label !== "identity-enrollment-continuity") throw new Error("owned_recovery_container_required");
+        const resume = running; running = false; clearTimeout(timer); await cycle;
+        if (backgroundError) throw backgroundError;
+        await closeServer(server); await current!.stop();
+        const key = randomBytes(32), iv = randomBytes(12), aad = Buffer.from(`tomato-owned-pg18-recovery:${id}`), backup = path.join(scratch!, "recovery.aesgcm");
+        let plaintext: Buffer | undefined, recovered: Buffer | undefined;
+        try {
+          const dumped = await command("docker", ["exec", container, "pg_dump", "-U", "postgres", "-d", id, "--format=custom", "--no-owner", "--no-acl"], { timeout: 30000, maxBuffer: 64 * 1024 * 1024, encoding: "buffer" });
+          plaintext = dumped.stdout;
+          const cipher = createCipheriv("aes-256-gcm", key, iv); cipher.setAAD(aad);
+          await writeFile(backup, Buffer.concat([iv, cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]), { mode: 0o600, flag: "wx" }); plaintext.fill(0);
+          const bytes = await readFile(backup), decrypt = createDecipheriv("aes-256-gcm", key, bytes.subarray(0, 12)); decrypt.setAAD(aad); decrypt.setAuthTag(bytes.subarray(-16));
+          recovered = Buffer.concat([decrypt.update(bytes.subarray(12, -16)), decrypt.final()]);
+          const restored = spawn("docker", ["exec", "-i", container, "pg_restore", "-U", id, "-d", id, "--clean", "--if-exists", "--no-owner", "--no-acl"], { stdio: ["pipe", "ignore", "ignore"] });
+          const done = new Promise<void>((resolve, reject) => { restored.once("error", reject); restored.once("exit", code => code === 0 ? resolve() : reject(new Error("owned_pg18_restore_failed"))); });
+          restored.stdin.on("error", () => {}); restored.stdin.end(recovered); await done;
+          await initialize(); running = resume; schedule();
+        } catch { throw new Error("owned_pg18_encrypted_recovery_failed"); }
+        finally { plaintext?.fill(0); recovered?.fill(0); key.fill(0); await rm(backup, { force: true }); }
+      } } : {}),
       close: cleanup,
     };
   } catch (error) {

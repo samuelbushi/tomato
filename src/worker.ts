@@ -50,6 +50,7 @@ async function dispatchNotification(env: Env, accountId: string, eventId: string
 
 /** Target and provider I/O always happens between committed claim and completion transactions. */
 export async function executeMessage(env: Env, message: EngineMessage): Promise<void> {
+  if (env.WORKLOADS_ENABLED === false) throw new ApiError(503, "monitoring_workloads_disabled");
   identifier(message.accountId);
   if (message.kind === "check") {
     const { claim } = await accountCall<{ claim: ClaimedCheck | null }>(env, message.accountId, "/claim", { jobId: message.jobId });
@@ -74,6 +75,7 @@ export async function executeMessage(env: Env, message: EngineMessage): Promise<
 }
 
 export async function tickAccounts(database: PgDatabase, env: Env): Promise<void> {
+  if (env.WORKLOADS_ENABLED === false) return;
   let cursor = "";
   for (;;) {
     const accounts = await database.query<{id:string}>("SELECT id FROM engine.accounts WHERE id>$1 ORDER BY id LIMIT 50", [cursor]);
@@ -91,6 +93,7 @@ let dispatchCursor = "";
  */
 export async function dispatchOutbox(database: PgDatabase, env: Env, limit = 4): Promise<number> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 16) throw new Error("invalid_dispatch_limit");
+  if (env.WORKLOADS_ENABLED === false) return 0;
   const accounts = await database.query<{id:string}>("SELECT id FROM engine.accounts WHERE id>$1 ORDER BY id LIMIT 200", [dispatchCursor]);
   if (!accounts.length) { dispatchCursor = ""; return 0; }
   const claimed: {accountId:string; id:string; token:string; message:EngineMessage}[] = [];

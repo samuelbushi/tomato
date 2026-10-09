@@ -18,7 +18,7 @@ const exported = z.object({
   mcp_sessions: z.array(z.object({ id, user_id: id, account_id: id, auth_binding: id, protocol_version: z.string(), expires_at: time, initialized: z.union([z.literal(0), z.literal(1)]) })),
 });
 const emailMap = z.record(z.string(), z.object({ email: z.email(), name: z.string().min(1).max(120), emailVerified: z.boolean() }));
-const proofs = z.record(z.string(), z.string().min(14).max(256));
+const proofs = z.record(z.string(), z.string().min(1).max(256));
 const argumentsByName: Record<string, string | true> = Object.create(null);
 const allowed: Record<string, true> = { "--export": true, "--email-map": true, "--pepper-file": true, "--expires-at": true, "--password-proofs": true, "--acknowledge-session-invalidation": true, "--finalize": true };
 for (let index = 2; index < process.argv.length; index++) {
@@ -44,7 +44,7 @@ try {
     const expiresAt = Number(argumentsByName["--expires-at"]);
     const result = await importLegacyIdentity(database, {
       export: exported.parse(JSON.parse(await explicitFile("--export"))),
-      emailMap: emailMap.parse(JSON.parse(await explicitFile("--email-map"))),
+      emailMap: argumentsByName["--email-map"] ? emailMap.parse(JSON.parse(await explicitFile("--email-map"))) : undefined,
       passwordProofs: argumentsByName["--password-proofs"] ? proofs.parse(JSON.parse(await explicitFile("--password-proofs"))) : undefined,
       migration: { pepper: (await explicitFile("--pepper-file")).trim(), expiresAt },
       acknowledgeLegacySessionInvalidation: true,
@@ -53,6 +53,6 @@ try {
   }
 } catch {
   // Input data includes verifier/credential material; never print raw errors or schemas containing it.
-  console.error("Identity import failed. Check approved complete export, exact real-email mapping, target emptiness, pepper and cutover deadline. No partial import was committed.");
+  console.error("Identity import failed. Check approved complete export, optional actual-contact mappings, target emptiness, pepper and full-login bridge deadline. No partial import was committed.");
   process.exitCode = 1;
 } finally { await database.close(); }

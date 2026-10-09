@@ -53,7 +53,7 @@ export function createEgressServer({ token, test } = {}) {
 
 if (process.env.TOMATO_CONTAINER_SERVER === '1') {
   if (process.env.NODE_ENV !== 'production' || process.env.TEST_MODE || process.env.TOMATO_TRANSPORT_TEST ||
-      Object.keys(process.env).some(key => /^(?:DATABASE_URL|POSTGRES_|PG(?:HOST|USER|PASSWORD|DATABASE|PORT)|DATA_KEY|AUTH_SECRET|AUTH_PEPPER|ENGINE_TOKEN|TOMATO_(?:DB_|AUTH_|ENGINE_|OWNER_|SMTP_|GITHUB_|GOOGLE_|LEGACY_))/.test(key))) {
+      Object.keys(process.env).some(key => /^(?:DATABASE_URL|POSTGRES_|PG(?:HOST|USER|PASSWORD|DATABASE|PORT)|DATA_KEY|AUTH_SECRET|AUTH_PEPPER|ENGINE_TOKEN|TOMATO_(?:DB_|AUTH_|ENGINE_|OWNER_|SMTP_|GITHUB_|GOOGLE_|LEGACY_|GATEWAY_))/.test(key))) {
     throw new Error('prober_forbidden_configuration');
   }
   const token = readFileSync(process.env.TOMATO_PROBER_TOKEN_FILE ?? '/run/secrets/prober_token', 'utf8').trim();

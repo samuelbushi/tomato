@@ -2,6 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import type { PoolConfig } from "pg";
 import type { IdentityConfig, ProvisionInput } from "./identity";
 import { validateLegacyMigrationRuntime } from "./identity-legacy";
+import type { GatewayConfig } from "./gateway";
 
 /** Secret-file inputs avoid credentials in Compose environment or process arguments. */
 export async function secret(name: string, required = true): Promise<string | undefined> {
@@ -30,6 +31,17 @@ export async function databaseConfig(admin = false): Promise<PoolConfig> {
   };
 }
 
+/** Optional dedicated transport key; it grants no product or operator authority. */
+export async function gatewayConfig(): Promise<GatewayConfig | undefined> {
+  const sourceOrigin = process.env.TOMATO_GATEWAY_SOURCE_ORIGIN, keyId = process.env.TOMATO_GATEWAY_KEY_ID;
+  const encoded = await secret("TOMATO_GATEWAY_KEY", false);
+  if (sourceOrigin === undefined && keyId === undefined && encoded === undefined) return undefined;
+  if (!sourceOrigin || !keyId || !encoded || !/^[A-Za-z0-9_-]{1,80}$/.test(keyId) || !/^[A-Za-z0-9_-]{43}$/.test(encoded)) throw new Error("invalid_gateway_configuration");
+  const source = new URL(sourceOrigin), key = Buffer.from(encoded, "base64url");
+  if (source.protocol !== "https:" || source.origin !== sourceOrigin || source.username || source.password || source.hash || source.search || key.length !== 32 || key.toString("base64url") !== encoded) throw new Error("invalid_gateway_configuration");
+  return { sourceOrigin, keyId, key };
+}
+
 export async function identityConfig(): Promise<IdentityConfig> {
   const baseURL = process.env.TOMATO_ORIGIN;
   if (!baseURL) throw new Error("missing_tomato_origin");
@@ -42,6 +54,9 @@ export async function identityConfig(): Promise<IdentityConfig> {
     config.smtp = { host: process.env.TOMATO_SMTP_HOST, port, secure: process.env.TOMATO_SMTP_SECURE === "true", from,
       user: process.env.TOMATO_SMTP_USER, password: await secret("TOMATO_SMTP_PASSWORD", Boolean(process.env.TOMATO_SMTP_USER)), ca: await secret("TOMATO_SMTP_CA", false) };
   }
+  const daily = process.env.TOMATO_SMTP_DAILY_LIMIT, hourly = process.env.TOMATO_SMTP_HOURLY_LIMIT;
+  if (Boolean(daily) !== Boolean(hourly)) throw new Error("incomplete_smtp_mail_budget");
+  if (daily && hourly) config.mailBudget = { daily: Number(daily), hourly: Number(hourly) };
   for (const provider of ["github", "google"] as const) {
     const prefix = `TOMATO_${provider.toUpperCase()}`;
     const clientId = process.env[`${prefix}_CLIENT_ID`];

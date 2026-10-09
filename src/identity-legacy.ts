@@ -22,10 +22,15 @@ export function validateLegacyMigration(config: LegacyMigrationConfig): void {
 export async function verifyCutoverPassword(data: { hash: string; password: string }, config?: LegacyMigrationConfig): Promise<boolean> {
   if (!isLegacyCredential(data.hash)) return verifyPassword(data);
   if (!config || Date.now() >= config.expiresAt || Buffer.byteLength(data.password) > 256) return false;
+  return verifyLegacyEnrollmentPassword(data, config.pepper);
+}
+/** Old credentials have no product-login authority here, only restricted contact enrollment. */
+export async function verifyLegacyEnrollmentPassword(data: { hash: string; password: string }, pepper: string): Promise<boolean> {
+  if (!isLegacyCredential(data.hash) || !pepper || !data.password || Buffer.byteLength(data.password) > 256) return false;
   let payload: unknown;
   try { payload = JSON.parse(Buffer.from(data.hash.slice(PREFIX.length), "base64url").toString("utf8")); } catch { return false; }
   if (!payload || typeof payload !== "object" || !("salt" in payload) || typeof payload.salt !== "string" || !("verifier" in payload) || typeof payload.verifier !== "string" || !/^[a-f0-9]{64}$/i.test(payload.verifier)) return false;
-  const material = createHmac("sha256", config.pepper).update(data.password).digest();
+  const material = createHmac("sha256", pepper).update(data.password).digest();
   const completion = Promise.withResolvers<Buffer>();
   scrypt(material, payload.salt, 32, { N: 16384, r: 8, p: 5, maxmem: 32 * 1024 * 1024 }, (error, key) => error ? completion.reject(error) : completion.resolve(key));
   const result = await completion.promise;
@@ -39,5 +44,5 @@ export async function rehashSuccessfulCutoverLogin(database: PgDatabase, userId:
 /** Refuse completion until every imported credential is rehashed or replaced by maintained password reset. */
 export async function finalizeLegacyIdentityCutover(database: PgDatabase): Promise<void> {
   const rows = await database.query<{ count: number }>("SELECT COUNT(*)::integer AS count FROM public.auth_account WHERE password LIKE $1", [`${PREFIX}%`]);
-  if (rows[0]?.count !== 0) throw new Error("legacy_cutover_not_complete_all_users_must_rehash_or_reset");
+  if (rows[0]?.count !== 0 || (await database.query("SELECT user_id FROM identity.legacy_enrollment LIMIT 1")).length) throw new Error("legacy_cutover_not_complete_all_users_must_enroll_or_rehash");
 }

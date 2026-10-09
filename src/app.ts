@@ -1,8 +1,9 @@
 import { ApiError, body, constantEqual, identifier, integer, json } from "./validation";
 import { randomToken } from "./identity";
+import { RECOVERY_NOTICE } from "./auth";
 import type { Env } from "./runtime-types";
 import type { EngineSnapshot, MonitorView } from "./types";
-import type { AccountSummary, AuthenticatedView, DeliveryView, InvitationView, MemberView, SessionView, ApiKeyView, AuditView, Principal, PublicPageConfig, PublicStatusView, UiPage, WalletView, NotificationDefaultsView, MaintenanceWindow } from "./product-types";
+import type { AccountSummary, AuthenticatedView, DeliveryView, InvitationView, InvitationPreview, MemberView, SessionView, ApiKeyView, AuditView, Principal, PublicPageConfig, PublicStatusView, UiPage, WalletView, NotificationDefaultsView, MaintenanceWindow } from "./product-types";
 import { renderUi } from "./ui";
 import { executeManagement, readiness, toolsFor } from "./management";
 import { accountManagement } from "./management-routes";
@@ -12,6 +13,7 @@ const encoder = new TextEncoder();
 interface ParsedInput { values: Record<string, unknown>; form: URLSearchParams | null }
 
 function csrfName(env: Env): string { return env.TEST_MODE ? "tomato-csrf" : "__Host-tomato-csrf"; }
+function enrollmentName(env: Env): string { return env.TEST_MODE ? "tomato-enrollment" : "__Host-tomato-enrollment"; }
 function cookie(request: Request, name: string): string {
   for (const part of (request.headers.get("Cookie") ?? "").split(";")) {
     const [key, ...value] = part.trim().split("=");
@@ -19,8 +21,8 @@ function cookie(request: Request, name: string): string {
   }
   return "";
 }
-function setCookie(env: Env, name: string, value: string, maxAge: number): string {
-  return `${name}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${env.TEST_MODE ? "" : "; Secure"}`;
+function setCookie(env: Env, name: string, value: string, maxAge: number, sameSite: "Strict" | "Lax" = "Strict"): string {
+  return `${name}=${value}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${maxAge}${env.TEST_MODE ? "" : "; Secure"}`;
 }
 function secureResponse(response: Response): Response {
   response.headers.set("X-Content-Type-Options", "nosniff");
@@ -205,11 +207,34 @@ export async function handleApp(request: Request, env: Env): Promise<Response | 
   }
   let failedEditor: { actor: Principal; values: Record<string, unknown>; monitor: MonitorView | null } | undefined;
   const api = path.startsWith("/api/");
-  if (!api && path !== "/" && !["/login", "/logout", "/signup", "/forgot-password", "/reset-password", "/verify-email", "/auth/social"].includes(path) && !path.startsWith("/app") && !path.startsWith("/invite/") && !path.startsWith("/status/")) return null;
+  if (!api && path !== "/" && !["/login", "/logout", "/signup", "/forgot-password", "/reset-password", "/verify-email", "/auth/social", "/enroll", "/enroll/invitation", "/enroll/contact", "/enroll/verify"].includes(path) && !path.startsWith("/app") && !path.startsWith("/invite/") && !path.startsWith("/status/")) return null;
   try {
     if (!env.TEST_MODE && url.protocol !== "https:") return secureResponse(new Response(null, { status: 308, headers: { Location: `https://${url.host}${url.pathname}${url.search}`, "Cache-Control": "no-store" } }));
     const legacyAuth = /^\/api\/auth\/(?:login|logout|password|sessions(?:\/.*)?)$/;
     if (path.startsWith("/api/auth/") && !legacyAuth.test(path)) return secureResponse(await env.identity.authHandler(request));
+    if (["/enroll", "/enroll/invitation", "/enroll/contact", "/enroll/verify"].includes(path)) {
+      if (request.headers.has("Authorization")) throw new ApiError(403, "cookie_enrollment_required");
+      if (request.method === "GET") {
+        const csrf = await anonymousCsrf(env), headers = { "Set-Cookie": setCookie(env, csrfName(env), csrf.signed, 900) };
+        if (path === "/enroll") return html({ kind: "enrollment", stage: "proof", csrfToken: csrf.token }, 200, headers);
+        if (path === "/enroll/invitation") throw new ApiError(405, "method_not_allowed");
+        const state = await identity<{ expiresAt: number; email: string | null; sent: boolean }>(env, "/enrollment/status", { claim: cookie(request, enrollmentName(env)) });
+        return html({ kind: "enrollment", stage: path === "/enroll/verify" ? "verify" : "contact", csrfToken: csrf.token, expiresAt: state.expiresAt, email: state.email, emailToken: path === "/enroll/verify" ? url.searchParams.get("token") ?? "" : undefined, notice: state.sent ? "SMTP accepted your verification message. Open its link in this browser before this claim expires." : undefined }, 200, headers);
+      }
+      if (request.method !== "POST") throw new ApiError(405, "method_not_allowed");
+      const { values } = await parseInput(request); await verifyAnonymousCsrf(request, env, values.csrfToken);
+      const trustedClientIp = request.headers.get("X-Tomato-Client-IP"), claim = cookie(request, enrollmentName(env));
+      if (path === "/enroll" || path === "/enroll/invitation") {
+        const started = await identity<{ claim: string; expiresAt: number }>(env, path === "/enroll" ? "/enrollment/start" : "/enrollment/invitation", { username: values.username, password: values.password, invitationToken: values.invitationToken, trustedClientIp });
+        return redirect("/enroll/contact", { "Set-Cookie": setCookie(env, enrollmentName(env), started.claim, Math.max(1, Math.floor((started.expiresAt - Date.now()) / 1000)), "Lax") });
+      }
+      if (path === "/enroll/contact") {
+        await identity(env, "/enrollment/contact", { claim, email: values.email, trustedClientIp });
+        return redirect("/enroll/contact");
+      }
+      await identity(env, "/enrollment/complete", { claim, emailToken: values.emailToken, trustedClientIp });
+      return redirect("/login", { "Set-Cookie": setCookie(env, enrollmentName(env), "", 0, "Lax") });
+    }
     if (["/signup", "/forgot-password", "/reset-password", "/verify-email"].includes(path)) {
       const mode = path === "/signup" ? "signup" : path === "/forgot-password" ? "forgot" : path === "/reset-password" ? "reset" : "verify";
       if (mode === "signup" && !env.identity.capabilities.signup) throw new ApiError(403, "signup_disabled");
@@ -224,7 +249,7 @@ export async function handleApp(request: Request, env: Env): Promise<Response | 
       const input = mode === "signup" ? { email: values.email, name: values.name, password: values.password, callbackURL: "/login" } : mode === "forgot" ? { email: values.email, redirectTo: new URL("/reset-password", url.origin).href } : mode === "reset" ? { newPassword: values.password, token: values.token } : { email: values.email, callbackURL: "/login" };
       const result = await maintainedAuth(request, env, endpoint, input);
       const csrf = await anonymousCsrf(env), headers = authCookies(result); headers.append("Set-Cookie", setCookie(env, csrfName(env), csrf.signed, 900));
-      return html({ kind: "login", pilotOnly: true, csrfToken: csrf.token, notice: mode === "reset" ? "Password reset. Sign in with your new password." : "Check your email for the next step.", ...env.identity.capabilities }, 200, headers);
+      return html({ kind: "login", pilotOnly: true, csrfToken: csrf.token, notice: mode === "reset" ? "Password reset. Sign in with your new password." : mode === "forgot" ? RECOVERY_NOTICE : "Check your email for the next step.", ...env.identity.capabilities }, 200, headers);
     }
     if (path === "/auth/social" && request.method === "POST") {
       const { values } = await parseInput(request); await verifyAnonymousCsrf(request, env, values.csrfToken);
@@ -265,11 +290,15 @@ export async function handleApp(request: Request, env: Env): Promise<Response | 
     const invite = path.match(/^\/invite\/(tomato_invite_[A-Za-z0-9_-]{43})$/);
     if (invite) {
       if (request.method === "GET") {
-        const preview = await identity<{ invitation: InvitationView; accountName: string; existingUser: boolean }>(env, "/invitations/preview", { token: invite[1] });
+        const preview = await identity<InvitationPreview>(env, "/invitations/preview", { token: invite[1] });
+        if (preview.legacyUsername) {
+          const csrf = await anonymousCsrf(env);
+          return html({ kind: "enrollment", stage: preview.legacyExisting ? "proof" : "invite", username: preview.legacyUsername, invitationToken: preview.legacyExisting ? undefined : invite[1], csrfToken: csrf.token, notice: preview.legacyExisting ? "This invitation targets an existing username. Prove its original password and verify your actual contact first; then sign in and return to the unchanged invitation link." : `This unchanged invitation targets ${preview.legacyUsername} for the ${preview.invitation.role} role in ${preview.accountName}. Verify your own actual contact to accept exactly this membership.` }, 200, { "Set-Cookie": setCookie(env, csrfName(env), csrf.signed, 900) });
+        }
         let signedIn = false, csrfToken: string;
         try { const actor = await principal(request, env); signedIn = actor.actor.username === preview.invitation.username; csrfToken = actor.csrfToken; } catch (error) { if (!(error instanceof ApiError) || error.status !== 401) throw error; csrfToken = ""; }
         const csrf = await anonymousCsrf(env);
-        return html({ kind: "invite", invitationToken: invite[1]!, accountName: preview.accountName, username: preview.invitation.username, role: preview.invitation.role, expiresAt: preview.invitation.expiresAt, existingUser: preview.existingUser, signedIn, csrfToken: signedIn ? csrfToken : csrf.token }, 200, { "Set-Cookie": setCookie(env, csrfName(env), csrf.signed, 900) });
+        return html({ kind: "invite", invitationToken: invite[1]!, accountName: preview.accountName, username: preview.invitation.username, role: preview.invitation.role, expiresAt: preview.invitation.expiresAt, identityStatus: preview.identityStatus, signedIn, csrfToken: signedIn ? csrfToken : csrf.token }, 200, { "Set-Cookie": setCookie(env, csrfName(env), csrf.signed, 900) });
       }
       if (request.method === "POST") {
         const { values } = await parseInput(request);
@@ -569,7 +598,7 @@ export async function handleApp(request: Request, env: Env): Promise<Response | 
   } catch (error) {
     if (!(error instanceof ApiError)) throw error;
     if (api) return secureResponse(json({ error: error.message }, error.status));
-    if (error.status === 401 && path !== "/login" && !path.startsWith("/invite/")) return redirect("/login");
+    if (error.status === 401 && path !== "/login" && !path.startsWith("/invite/") && !path.startsWith("/enroll")) return redirect("/login");
     if (failedEditor && !api) {
       const entered: Record<string, string> = {};
       for (const [name, value] of Object.entries(failedEditor.values)) if (typeof value === "string" && !/password|secret|headers|csrf/i.test(name)) entered[name] = value;
