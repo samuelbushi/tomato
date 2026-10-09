@@ -1,0 +1,50 @@
+{
+  "name": "tomato",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --import tsx src/server.ts",
+    "migrate": "node --import tsx src/migrate.ts",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "backup": "node scripts/backup.mjs",
+    "restore": "node scripts/restore.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.scripts.json",
+    "verify:engine": "node --import tsx scripts/verify-engine.ts",
+    "verify:product": "node --import tsx scripts/verify-product-engine.ts",
+    "verify:auth": "node --import tsx scripts/verify-auth.ts",
+    "verify:transport": "node --import tsx --test scripts/verify-transport.mjs",
+    "verify:app": "node --import tsx scripts/verify-app.ts",
+    "verify:management": "node --import tsx scripts/verify-management.ts",
+    "verify:mcp": "node --import tsx scripts/verify-mcp.ts",
+    "verify:setup": "node --import tsx scripts/verify-setup.ts",
+    "verify:ux": "node --import tsx scripts/verify-ux.ts",
+    "identity:import": "node --import tsx scripts/import-identity.ts",
+    "engine:import": "node --import tsx scripts/import-engine.ts",
+    "agent:stdio": "node scripts/agent-stdio.ts",
+    "verify:container": "node --import tsx scripts/verify-container.ts"
+  },
+  "dependencies": {
+    "better-auth": "1.7.7",
+    "dns-packet": "5.6.1",
+    "ipaddr.js": "2.2.0",
+    "nodemailer": "10.0.16",
+    "pg": "8.23.1",
+    "pg-connection-string": "2.14.1",
+    "tsx": "4.23.15",
+    "ws": "8.22.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@types/dns-packet": "^5.6.5",
+    "@types/node": "^24.0.0",
+    "@types/nodemailer": "8.0.2",
+    "@types/pg": "8.23.1",
+    "typescript": "6.0.3"
+  }
+}

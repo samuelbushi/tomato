@@ -1,0 +1,137 @@
+name: ${TOMATO_PROJECT_NAME:-tomato}
+services:
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tomato
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql]
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d tomato']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+  migrate:
+    build: .
+    entrypoint: [node, --import, tsx, src/migrate.ts]
+    restart: 'no'
+    environment:
+      PGHOST: postgres
+      PGDATABASE: tomato
+      PGSSLMODE: disable
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TOMATO_DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [postgres_password, db_password]
+    networks: [database]
+    depends_on:
+      postgres: {condition: service_healthy}
+  app:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ['/run/tomato-secrets:mode=0700', '/tmp:mode=1777']
+    security_opt: [no-new-privileges:true]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: tomato
+      PGSSLMODE: disable
+      TOMATO_DB_PASSWORD_FILE: /run/secrets/db_password
+      TOMATO_AUTH_SECRET_FILE: /run/secrets/auth_secret
+      DATA_KEY_FILE: /run/secrets/data_key
+      TOMATO_ENGINE_TOKEN_FILE: /run/secrets/engine_token
+      TOMATO_PROBER_TOKEN_FILE: /run/secrets/prober_token
+      TOMATO_OWNER_PASSWORD_FILE: /run/secrets/owner_password
+      TOMATO_ORIGIN: ${TOMATO_ORIGIN:?Run npm run bootstrap first}
+      TOMATO_MODE: ${TOMATO_MODE:-self-host}
+      TOMATO_BIND_HOST: 0.0.0.0
+      TOMATO_INTERNAL_NETWORK: 'true'
+      TOMATO_HTTPS_PROXY: 'true'
+      TOMATO_TRUSTED_PROXY_IPS: ${TOMATO_PROXY_IP:?Run bootstrap}
+      TOMATO_PROBER_URL: http://prober:8080/execute
+      TOMATO_OWNER_EMAIL: ${TOMATO_OWNER_EMAIL}
+      TOMATO_OWNER_NAME: ${TOMATO_OWNER_NAME}
+      TOMATO_OWNER_EMAIL_VERIFIED: ${TOMATO_OWNER_EMAIL_VERIFIED:-false}
+      TOMATO_ACCOUNT_ID: ${TOMATO_ACCOUNT_ID:-main}
+      TOMATO_ACCOUNT_NAME: ${TOMATO_ACCOUNT_NAME:-Tomato}
+      TOMATO_SIGNUP_ENABLED: ${TOMATO_SIGNUP_ENABLED:-false}
+      TOMATO_SMTP_HOST: ${TOMATO_SMTP_HOST:-}
+      TOMATO_SMTP_PORT: ${TOMATO_SMTP_PORT:-587}
+      TOMATO_SMTP_SECURE: ${TOMATO_SMTP_SECURE:-false}
+      TOMATO_SMTP_USER: ${TOMATO_SMTP_USER:-}
+      TOMATO_EMAIL_FROM: ${TOMATO_EMAIL_FROM:-}
+      TOMATO_GITHUB_CLIENT_ID: ${TOMATO_GITHUB_CLIENT_ID:-}
+      TOMATO_GOOGLE_CLIENT_ID: ${TOMATO_GOOGLE_CLIENT_ID:-}
+      TOMATO_LEGACY_CUTOVER_EXPIRES_AT: ${TOMATO_LEGACY_CUTOVER_EXPIRES_AT:-}
+    secrets: [db_password, auth_secret, data_key, engine_token, prober_token, owner_password]
+    networks: [database, rpc, frontend, application_egress]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      prober: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, 'const r=require("node:http").get({host:"127.0.0.1",port:3000,path:"/health/ready",headers:{Host:new URL(process.env.TOMATO_ORIGIN).host},timeout:2500},s=>{s.resume();s.on("end",()=>process.exit(s.statusCode===200?0:1));});r.on("timeout",()=>{r.destroy();process.exit(1);});r.on("error",()=>process.exit(1));']
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 15s
+    stop_grace_period: 50s
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+  prober:
+    build: {context: ., dockerfile: Dockerfile.prober}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ['/run/tomato-secrets:mode=0700', '/tmp:mode=1777']
+    security_opt: [no-new-privileges:true]
+    secrets: [prober_token]
+    environment:
+      TOMATO_PROBER_TOKEN_FILE: /run/secrets/prober_token
+    networks: [rpc, egress]
+    healthcheck:
+      test: [CMD, node, -e, 'const fs=require("node:fs");fetch("http://127.0.0.1:8080/ready",{headers:{authorization:"Bearer "+fs.readFileSync("/run/tomato-secrets/prober_token","utf8").trim()}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      TOMATO_ORIGIN: ${TOMATO_ORIGIN}
+    ports: ['${TOMATO_HTTPS_BIND:-127.0.0.1}:443:443', '${TOMATO_HTTPS_BIND:-127.0.0.1}:80:80']
+    volumes:
+      - ${TOMATO_STATE_DIR:?}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      frontend: {ipv4_address: '${TOMATO_PROXY_IP}'}
+      edge:
+    depends_on:
+      app: {condition: service_healthy}
+secrets:
+  postgres_password: {file: '${TOMATO_STATE_DIR}/secrets/postgres_password'}
+  db_password: {file: '${TOMATO_STATE_DIR}/secrets/db_password'}
+  auth_secret: {file: '${TOMATO_STATE_DIR}/secrets/auth_secret'}
+  data_key: {file: '${TOMATO_STATE_DIR}/secrets/data_key'}
+  engine_token: {file: '${TOMATO_STATE_DIR}/secrets/engine_token'}
+  prober_token: {file: '${TOMATO_STATE_DIR}/secrets/prober_token'}
+  owner_password: {file: '${TOMATO_STATE_DIR}/secrets/owner_password'}
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+networks:
+  database: {internal: true}
+  rpc: {internal: true}
+  frontend:
+    internal: true
+    ipam:
+      config: [{subnet: '${TOMATO_FRONTEND_SUBNET:?Run bootstrap}', ip_range: '${TOMATO_FRONTEND_IP_RANGE:?Run bootstrap to upgrade allocation policy}'}]
+  egress:
+  edge:
+  application_egress:

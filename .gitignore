@@ -1,0 +1,32 @@
+node_modules/
+.wrangler/
+.mf/
+.engine-verification/
+.dev.vars
+*.tsbuildinfo
+.tomato-local/
+.tomato-dev/
+
+# Runtime configuration, credentials and full database backups are private.
+.env
+.env.*
+!.env.example
+.tomato-production/
+.tomato-backups/
+backups/
+selfhost/
+*.tomato-backup
+*.dump
+*.backup
+*.sql.gz
+*.tar.gz
+*.key
+*.pem
+worker-secrets.json
+bootstrap.json
+
+# Local operational research and live-provider configuration are not release source.
+research/
+wrangler.jsonc
+wrangler.fixture.jsonc
+.srl

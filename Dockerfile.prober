@@ -1,0 +1,13 @@
+FROM node:24-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends gosu ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY container/package.json ./package.json
+COPY LICENSE NOTICE ./
+RUN npm install --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
+COPY container/transport.mjs container/server.mjs ./
+COPY container/app-entrypoint.sh /usr/local/bin/tomato-entrypoint
+RUN chmod 755 /usr/local/bin/tomato-entrypoint
+ENV NODE_ENV=production TOMATO_CONTAINER_SERVER=1
+EXPOSE 8080
+ENTRYPOINT ["tomato-entrypoint"]
+CMD ["node", "server.mjs"]

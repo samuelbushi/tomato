@@ -1,0 +1,76 @@
+Tomato
+
+Original Tomato project source is licensed under the Apache License,
+Version 2.0. See the accompanying LICENSE file. Copyright and other
+ownership rights remain with the respective authors and rights holders;
+this notice does not assign them to an unverified company or entity.
+Tomato is not an Apache Software Foundation project or endorsement.
+
+THIRD-PARTY SOFTWARE
+
+The Tomato Apache-2.0 license does not relicense dependencies, the Node.js
+runtime, Debian packages, gosu, PostgreSQL, Caddy, or other separately
+licensed software. Each retains its own copyright notices and license
+terms. This notice is informational, not a replacement for those licenses
+or for any source-availability obligations of redistributed components.
+
+Source installations resolve npm dependencies from package-lock.json and
+the prober's container/package.json. Preserve the installed packages'
+LICENSE, COPYING, NOTICE and other attribution files when redistributing
+them; their package.json metadata identifies the applicable license but
+is not a substitute for its complete terms.
+
+The application and prober images use the official Node.js Debian image
+and install gosu and ca-certificates. Relevant upstream licensing is
+provided by the Node distribution (including /usr/local/LICENSE where
+provided by that base image), Debian package notices under
+/usr/share/doc/*/copyright (including gosu), and npm package license files
+under /app/node_modules/. Package and file layouts can differ between
+versions; retain the actual upstream notices from the chosen image and
+dependency versions rather than applying the Tomato license to them.
+
+The separately distributed PostgreSQL and Caddy images retain their
+upstream licenses and notices. Operator/customer data, private runtime
+configuration and monitoring evidence are not automatically licensed or
+published as Tomato source merely because they are stored by Tomato.
+
+SUPPLEMENTAL npm LICENSE INFORMATION
+
+Some packages carry their complete terms outside a standalone LICENSE
+file. pg-types 2.2.0 includes its MIT terms and Brian M. Carlson copyright
+notice in README.md; pgpass 1.0.5 includes its MIT terms and Hannes Hörl
+copyright notice in README.md. The platform-specific esbuild binary and
+the matching esbuild package are the same upstream project; retain the
+matching esbuild/LICENSE.md, including the Evan Wallace copyright notice.
+
+@better-auth/utils 0.4.2 and 0.5.0 declare the MIT license and name Bereket
+Engida as author in their published package metadata. The published
+packages and their provenance-pinned sources contain no standalone
+copyright notice or complete license text (their READMEs identify MIT).
+The standard MIT grant and disclaimer are reproduced below to retain
+the declared license terms, not as a verbatim upstream license file;
+no copyright holder or year is invented. Upstream attribution and source:
+https://registry.npmjs.org/@better-auth%2Futils/0.4.2
+https://github.com/better-auth/utils/tree/b20329a32d78f1f9bcc088bbd6f982b28c4192f1
+https://registry.npmjs.org/@better-auth%2Futils/0.5.0
+https://github.com/better-auth/utils/tree/f03c1c76aff7bfa3f4de4af47b112315c770a0d1
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
