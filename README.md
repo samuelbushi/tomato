@@ -8,6 +8,8 @@ Self-hosting does **not** require a Cloudflare/Appwrite account, remote activati
 
 This source tree contains the new portable Node/PostgreSQL runtime. It does not automatically deploy, migrate or replace an existing service. The existing hosted service at <https://tomato.objectivecompany.workers.dev/> still runs the previous Cloudflare release; no portable hosted cutover has occurred.
 
+As of 2026-10-09, an immutable Linux/amd64 package is staged on the authorized host with private HTTPS, no published host ports and monitoring workloads disabled. Real PostgreSQL/HTTP/SMTP acceptance and native no-JavaScript login/enrollment rendering have been exercised. One explicitly authorized mail canary was SMTP-provider-accepted; inbox receipt was not observed. The new public hostname/tunnel is not active and no existing customer state has been imported. Live replacement remains withheld until actual pre-patch external writes/deliveries are settled or fenced; deployment percentage or a claimed zero-in-flight count is not that proof.
+
 Commercial signup and payment processing are not enabled by this release. Hosted mode has the shared monitoring product and an enforced eligible-work credit ledger, not a simulated checkout or an approved retail offering. A commercial launch still needs an authorized host/domain/cutover, approved sender and OAuth applications where used, merchant/payment configuration, prices and applicable legal policies. No price, SLA, geographic independence, measured production capacity or lowest-cost claim is made here.
 
 ## Monitoring and management
