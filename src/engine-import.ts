@@ -48,7 +48,7 @@ export async function importLegacyEngine(database: PgDatabase, input: unknown, d
     await tx.query("SELECT set_config('tomato.account_id',$1,true)", [accountId]);
     const counts = await (async () => {
       for (const table of [...Object.keys(TABLE_COLUMNS),"archives"]) {
-        if ((await tx.query(`SELECT 1 FROM ${table} LIMIT 1`)).length) throw new Error("engine_import_target_not_empty");
+        if ((await tx.query(`SELECT 1 FROM ${table} WHERE account_id=$1 LIMIT 1`,[accountId])).length) throw new Error("engine_import_target_not_empty");
       }
       let importedRows = 0;
       const metadataKeys = new Set<string>();
@@ -101,7 +101,7 @@ export async function importLegacyEngine(database: PgDatabase, input: unknown, d
       }
       if (!metadataKeys.has("heartbeat-usage")) throw new Error("provable_cumulative_heartbeat_usage_required");
       await tx.query("INSERT INTO metadata(key,value) VALUES('engine-mode','hosted') ON CONFLICT DO NOTHING");
-      const page = await tx.query<{value:string}>("SELECT value FROM metadata WHERE key='status-page'");
+      const page = await tx.query<{value:string}>("SELECT value FROM metadata WHERE account_id=$1 AND key='status-page'",[accountId]);
       if (page[0] && !metadataKeys.has("status-page-revision")) await tx.query("INSERT INTO metadata(key,value) VALUES('status-page-revision',$1)",[String(record(JSON.parse(page[0].value)).revision)]);
       for (const value of archiveRecords) {
         const archive=record(value);

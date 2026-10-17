@@ -7,6 +7,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createHmac, randomBytes } from "node:crypto";
 import { AccountSecrets } from "../src/account-secrets.ts";
 import { importLegacyEngine } from "../src/engine-import.ts";
+import pg from "pg";
+import { PgDatabase } from "../src/database.ts";
 import type { ClaimedCheck, EngineSnapshot, MonitorInput, MonitorView, NotificationRecord, NotificationView, ProbeResult } from "../src/types.ts";
 import type { AvailabilityReport, PublicPageConfig, PublicStatusView, WalletView } from "../src/product-types.ts";
 
@@ -514,6 +516,30 @@ try {
       for (const id of rollbackAccounts) await target.database.transaction(id, async tx => {
         for (const table of Object.keys(columns)) assert.equal((await tx.query(`SELECT 1 FROM engine.${table} LIMIT 1`)).length, 0, "A later account failure rolls back every earlier imported row");
       });
+      const adminUrl = new URL(process.env.TEST_DATABASE_ADMIN_URL ?? "postgresql://localhost/postgres");
+      adminUrl.pathname = new URL(target.databaseUrl).pathname;
+      const importer = new PgDatabase(new pg.Pool({ connectionString: adminUrl.href, max: 1 }));
+      try {
+        const accounts = rollbackAccounts.map((id,index) => {
+          const tables: Record<string, Record<string, unknown>[]> = Object.fromEntries(Object.keys(columns).map(table => [table,[]]));
+          const page: PublicPageConfig = { revision:index+7, slug:`offline-import-${index}`, title:"Imported status", published:false, components:[], updatedAt:Date.now(), updates:[] };
+          tables.metadata = [{key:"account",value:id},{key:"engine-mode",value:"hosted"},{key:"heartbeat-usage",value:"0"},{key:"status-page",value:JSON.stringify(page)}];
+          tables.wallet = [{id:1,balance:23,reserved:0,usage:0,missed:0,archive_sequence:0}];
+          tables.deposits = [{id:"owned-import-grant",credits:23}];
+          tables.grants = [{id:"owned-import-grant",reason:"Owned import regression",created_at:Date.now()}];
+          return {accountId:id,tables,archives:[]};
+        });
+        const importedPair = await importLegacyEngine(importer,{...exported,accounts},target.env.DATA_KEY,true);
+        assert.equal(importedPair.accounts,2);
+        for (const [index,id] of rollbackAccounts.entries()) await target.database.transaction(id,async tx => {
+          const wallets = await tx.query<{balance:number;usage:number;reserved:number}>("SELECT balance,usage,reserved FROM engine.wallet");
+          assert.deepEqual(wallets,[{balance:23,usage:0,reserved:0}]);
+          const revision = await tx.query<{value:string}>("SELECT value FROM engine.metadata WHERE key='status-page-revision'");
+          assert.equal(revision[0]!.value,String(index+7),"Privileged import must not borrow another account's page revision");
+        });
+        const untouched = await call<EngineSnapshot>("/state");
+        assert.equal(untouched.balance,delivered.balance); assert.equal(untouched.usage,delivered.usage);
+      } finally { await importer.close(); }
       await target.restart();
       const afterRestart = await call<EngineSnapshot>("/state"); assert.equal(afterRestart.usage, 3); assert.equal(afterRestart.reserved, 0);
       await executeMessage(target.env, { kind: "check", accountId: account, jobId: held.job.id });

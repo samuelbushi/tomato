@@ -21,11 +21,15 @@ for (const path of [candidate,actual]) {
 }
 const info=await stat(actual);
 if (!info.isFile() || info.size>134217728 || (info.mode&0o077)!==0) throw new Error("engine_export_requires_private_bounded_file");
-const database=new PgDatabase(new pg.Pool(await databaseConfig()));
+// Restoring imported cursor high-water marks requires sequence UPDATE authority.
+// Keep this offline administrator credential out of the running application.
+const database=new PgDatabase(new pg.Pool(await databaseConfig(true)));
 try {
   const result=await importLegacyEngine(database,JSON.parse(await readFile(actual,"utf8")),(await secret("DATA_KEY"))!,true);
   console.log(JSON.stringify(result));
-} catch {
-  console.error("Engine import failed. Check complete approved account tables and archives, original cumulative counters, preserved identity accounts and target emptiness. No account data was committed.");
+} catch (error) {
+  const reason=error instanceof Error && /^[a-z_]{1,100}$/.test(error.message) ? error.message : "engine_import_failed";
+  const sqlState=error && typeof error==="object" && "code" in error && typeof error.code==="string" && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : null;
+  console.error(JSON.stringify({error:"engine_import_failed",reason,sqlState,commitAcknowledged:false}));
   process.exitCode=1;
 } finally { await database.close(); }
